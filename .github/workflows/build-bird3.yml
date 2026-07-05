@@ -3,13 +3,10 @@ name: Build latest BIRD 3
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 3 * * *"   # 每天 UTC 03:00 自动检查
+    - cron: "0 3 * * *"
 
 permissions:
   contents: write
-
-env:
-  BIRD_MAJOR: "3"
 
 jobs:
   detect:
@@ -17,459 +14,315 @@ jobs:
     runs-on: ubuntu-24.04
 
     outputs:
-      version: ${{ steps.detect.outputs.version }}
-      tag: ${{ steps.detect.outputs.tag }}
-      download_url: ${{ steps.detect.outputs.download_url }}
-      should_build: ${{ steps.check_release.outputs.should_build }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      source_url: ${{ steps.version.outputs.source_url }}
+      release_exists: ${{ steps.release_check.outputs.exists }}
 
     steps:
       - name: Detect latest BIRD 3 version
-        id: detect
+        id: version
         shell: bash
         run: |
           set -euo pipefail
 
           PAGE_URL="https://bird.nic.cz/get-bird/"
+          DOWNLOAD_BASE_URL="https://bird.nic.cz/download"
 
           html="$(curl -fsSL "$PAGE_URL")"
 
-          version="$(
-            printf '%s\n' "$html" |
-            grep -oE "BIRD ${BIRD_MAJOR}\.[0-9]+\.[0-9]+" |
-            sed -E 's/^BIRD //' |
-            sort -V |
-            tail -n1
-          )"
+          version="$(printf '%s\n' "$html" \
+            | grep -oE 'bird-[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz|BIRD 3\.[0-9]+\.[0-9]+' \
+            | sed -E 's/bird-//; s/\.tar\.gz//; s/BIRD //' \
+            | grep -E '^3\.[0-9]+\.[0-9]+$' \
+            | sort -V \
+            | tail -n1)"
 
-          if [ -z "${version}" ]; then
-            echo "Failed to detect latest BIRD ${BIRD_MAJOR} version"
+          if [ -z "$version" ]; then
+            echo "Failed to detect latest BIRD 3 version"
             exit 1
           fi
 
-          download_url="https://bird.nic.cz/download/bird-${version}.tar.gz"
-          tag="bird-v${version}"
+          source_url="${DOWNLOAD_BASE_URL}/bird-${version}.tar.gz"
 
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "download_url=${download_url}" >> "$GITHUB_OUTPUT"
+          echo "Latest BIRD 3 version: $version"
+          echo "Source URL: $source_url"
 
-          echo "Detected version: ${version}"
-          echo "Download URL: ${download_url}"
-          echo "Release tag: ${tag}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=bird3-v$version" >> "$GITHUB_OUTPUT"
+          echo "source_url=$source_url" >> "$GITHUB_OUTPUT"
 
-      - name: Check whether release already exists
-        id: check_release
+      - name: Check release exists
+        id: release_check
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.detect.outputs.tag }}
+          GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release ${TAG} already exists. Skip build."
-            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          TAG="${{ steps.version.outputs.tag }}"
+
+          if gh release view "$TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG already exists, skip build."
           else
-            echo "Release ${TAG} does not exist. Build required."
-            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG does not exist, continue build."
           fi
 
   build:
-    name: Build BIRD 3 ${{ matrix.target }}
+    name: Build BIRD3 ${{ matrix.artifact_name }}
     needs: detect
-    if: needs.detect.outputs.should_build == 'true'
+    if: needs.detect.outputs.release_exists == 'false'
 
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: linux-amd64
-            runner: ubuntu-24.04
-            arch: amd64
+          - artifact_name: linux-amd64
+            target: linux/amd64
+            docker_platform: linux/amd64
 
-          - target: linux-arm64
-            runner: ubuntu-24.04-arm
-            arch: arm64
+          - artifact_name: linux-arm64
+            target: linux/arm64
+            docker_platform: linux/arm64
 
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04
 
     steps:
-      - name: Install build dependencies
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build BIRD 3 with Docker
         shell: bash
         run: |
           set -euo pipefail
 
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            curl \
-            ca-certificates \
-            xz-utils \
-            tar \
-            gzip \
-            pkg-config \
-            flex \
-            bison \
-            m4 \
-            libreadline-dev \
-            libncurses-dev
+          VERSION="${{ needs.detect.outputs.version }}"
+          SOURCE_URL="${{ needs.detect.outputs.source_url }}"
+          ARTIFACT_NAME="${{ matrix.artifact_name }}"
+          DOCKER_PLATFORM="${{ matrix.docker_platform }}"
 
-      - name: Download BIRD source
+          mkdir -p "out-${ARTIFACT_NAME}"
+
+          docker run --rm \
+            --platform "$DOCKER_PLATFORM" \
+            -v "$PWD/out-${ARTIFACT_NAME}:/out" \
+            debian:12 \
+            bash -lc "
+              set -euo pipefail
+
+              apt-get update
+              apt-get install -y \
+                ca-certificates \
+                curl \
+                build-essential \
+                flex \
+                bison \
+                m4 \
+                autoconf \
+                automake \
+                libtool \
+                pkg-config \
+                libreadline-dev \
+                libncurses-dev \
+                zlib1g-dev
+
+              curl -fL -o \"bird-${VERSION}.tar.gz\" \"${SOURCE_URL}\"
+              tar -xf \"bird-${VERSION}.tar.gz\"
+
+              cd \"bird-${VERSION}\"
+
+              ./configure \
+                --prefix=/opt/bird3 \
+                --sbindir=/opt/bird3 \
+                --sysconfdir=/etc/bird \
+                --localstatedir=/var \
+                --runstatedir=/run/bird \
+                --with-protocols=all
+
+              make -j\"\$(nproc)\"
+
+              ./bird --version || true
+              ./birdcl --version || true
+              ./birdc --version || true
+
+              mkdir -p /out
+
+              cp bird /out/bird3
+              cp birdcl /out/birdcl
+              cp birdc /out/birdc || true
+
+              cp bird.conf.example /out/bird3.conf.example 2>/dev/null || true
+              cp README* /out/ 2>/dev/null || true
+              cp NEWS* /out/ 2>/dev/null || true
+              cp COPYING* /out/ 2>/dev/null || true
+
+              ldd /out/bird3 > /out/ldd-bird3.txt || true
+              ldd /out/birdcl > /out/ldd-birdcl.txt || true
+            "
+
+      - name: Package artifact
         shell: bash
-        env:
-          VERSION: ${{ needs.detect.outputs.version }}
-          DOWNLOAD_URL: ${{ needs.detect.outputs.download_url }}
         run: |
           set -euo pipefail
 
-          curl -fL "$DOWNLOAD_URL" -o "bird-${VERSION}.tar.gz"
-          tar -xzf "bird-${VERSION}.tar.gz"
+          NAME="bird3"
+          VERSION="${{ needs.detect.outputs.version }}"
+          SOURCE_URL="${{ needs.detect.outputs.source_url }}"
+          ARTIFACT_NAME="${{ matrix.artifact_name }}"
+          TARGET="${{ matrix.target }}"
+          BUILD="ubuntu-24.04"
+          PACKAGE_NAME="bird3-${VERSION}-${ARTIFACT_NAME}"
+          BUILT_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-          test -d "bird-${VERSION}"
+          mkdir -p "$PACKAGE_NAME"
 
-      - name: Configure and build
-        shell: bash
-        env:
-          VERSION: ${{ needs.detect.outputs.version }}
-        run: |
-          set -euo pipefail
+          cp "out-${ARTIFACT_NAME}/bird3" "$PACKAGE_NAME/bird3"
+          cp "out-${ARTIFACT_NAME}/birdcl" "$PACKAGE_NAME/birdcl"
+          cp "out-${ARTIFACT_NAME}/birdc" "$PACKAGE_NAME/birdc" || true
+          cp "out-${ARTIFACT_NAME}/bird3.conf.example" "$PACKAGE_NAME/bird3.conf.example" || true
+          cp "out-${ARTIFACT_NAME}/ldd-bird3.txt" "$PACKAGE_NAME/ldd-bird3.txt" || true
+          cp "out-${ARTIFACT_NAME}/ldd-birdcl.txt" "$PACKAGE_NAME/ldd-birdcl.txt" || true
+          cp "out-${ARTIFACT_NAME}"/README* "$PACKAGE_NAME/" 2>/dev/null || true
+          cp "out-${ARTIFACT_NAME}"/NEWS* "$PACKAGE_NAME/" 2>/dev/null || true
+          cp "out-${ARTIFACT_NAME}"/COPYING* "$PACKAGE_NAME/" 2>/dev/null || true
 
-          cd "bird-${VERSION}"
+          chmod +x "$PACKAGE_NAME/bird3" || true
+          chmod +x "$PACKAGE_NAME/birdcl" || true
+          chmod +x "$PACKAGE_NAME/birdc" || true
 
-          ./configure \
-            --prefix=/usr \
-            --sysconfdir=/etc/bird \
-            --localstatedir=/var \
-            --runstatedir=/run
-
-          make -j"$(nproc)"
-
-      - name: Package runtime
-        shell: bash
-        env:
-          VERSION: ${{ needs.detect.outputs.version }}
-          TARGET: ${{ matrix.target }}
-          ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-
-          SRC_DIR="bird-${VERSION}"
-          PKG_DIR="bird-${VERSION}-${TARGET}"
-
-          mkdir -p "${PKG_DIR}"
-
-          cp "${SRC_DIR}/bird" "${PKG_DIR}/bird"
-          cp "${SRC_DIR}/birdcl" "${PKG_DIR}/birdcl"
-
-          chmod +x "${PKG_DIR}/bird"
-          chmod +x "${PKG_DIR}/birdcl"
-
-          cat > "${PKG_DIR}/bird.conf.example" <<'EOF'
-          log stderr all;
-
-          router id 10.255.255.254;
-
-          protocol device {
-                  scan time 60;
-          }
-
-          protocol direct {
-                  disabled;
-                  ipv4;
-                  ipv6;
-          }
-
-          protocol kernel {
-                  ipv4 {
-                          import none;
-                          export none;
-                  };
-          }
-
-          protocol kernel {
-                  ipv6 {
-                          import none;
-                          export none;
-                  };
-          }
-
-          protocol static overseas_routes {
-                  ipv4;
-                  # include "/opt/bird3/routes4.conf";
-          }
-
-          protocol static overseas_routes_v6 {
-                  ipv6;
-                  # include "/opt/bird3/routes6.conf";
-          }
-
-          protocol ospf v2 {
-                  ipv4 {
-                          export where proto = "overseas_routes";
-                  };
-
-                  area 0.0.0.0 {
-                          interface "eth0" {
-                                  type broadcast;
-                                  cost 10;
-                                  hello 10;
-                                  dead 40;
-                          };
-                  };
-          }
-
-          protocol ospf v3 {
-                  ipv6 {
-                          export where proto = "overseas_routes_v6";
-                  };
-
-                  area 0.0.0.0 {
-                          interface "eth0" {
-                                  type broadcast;
-                                  cost 10;
-                                  hello 10;
-                                  dead 40;
-                          };
-                  };
-          }
-          EOF
-
-          sed -i 's/^          //' "${PKG_DIR}/bird.conf.example"
-
-          cat > "${PKG_DIR}/bird3.service" <<'EOF'
+          cat > "$PACKAGE_NAME/bird3.service" <<EOF
           [Unit]
           Description=BIRD 3 Internet Routing Daemon
+          Documentation=https://bird.nic.cz/
           After=network-online.target
           Wants=network-online.target
 
           [Service]
           Type=simple
-          WorkingDirectory=/opt/bird3
-          ExecStart=/opt/bird3/bird -f -c /opt/bird3/bird.conf -s /opt/bird3/bird.ctl
-          ExecReload=/opt/bird3/birdcl -s /opt/bird3/bird.ctl configure
+          RuntimeDirectory=bird
+          RuntimeDirectoryMode=0755
+          ExecStart=/opt/bird3/bird3 -f -c /opt/bird3/bird3.conf -s /run/bird/bird.ctl
+          ExecReload=/opt/bird3/birdc -s /run/bird/bird.ctl configure
           Restart=on-failure
           RestartSec=3
+          CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+          AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+          NoNewPrivileges=true
 
           [Install]
           WantedBy=multi-user.target
           EOF
 
-          sed -i 's/^          //' "${PKG_DIR}/bird3.service"
+          cat > "$PACKAGE_NAME/manifest.json" <<EOF
+          {
+            "name": "${NAME}",
+            "version": "${VERSION}",
+            "target": "${TARGET}",
+            "build": "${BUILD}",
+            "artifact": "${ARTIFACT_NAME}",
+            "source_url": "${SOURCE_URL}",
+            "built_at": "${BUILT_AT}",
+            "files": {
+              "bird3": "bird3",
+              "birdcl": "birdcl",
+              "birdc": "birdc",
+              "config_example": "bird3.conf.example",
+              "service": "bird3.service"
+            }
+          }
+          EOF
 
-          cat > "${PKG_DIR}/install.sh" <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
+          cat > "$PACKAGE_NAME/README-RUNTIME.md" <<EOF
+          # BIRD3 ${VERSION} runtime
 
-          cd "$(dirname "$0")"
+          Built from official source:
 
+          ${SOURCE_URL}
+
+          ## Files
+
+          - bird3
+          - birdcl
+          - birdc
+          - bird3.conf.example
+          - bird3.service
+          - manifest.json
+
+          ## Install example
+
+          \`\`\`bash
           sudo mkdir -p /opt/bird3
-
-          sudo cp bird /opt/bird3/bird
-          sudo cp birdcl /opt/bird3/birdcl
-          sudo cp bird.conf.example /opt/bird3/bird.conf.example
-
-          sudo chmod +x /opt/bird3/bird
-          sudo chmod +x /opt/bird3/birdcl
-
-          if [ ! -f /opt/bird3/bird.conf ]; then
-            sudo cp /opt/bird3/bird.conf.example /opt/bird3/bird.conf
-            echo "Created /opt/bird3/bird.conf from example"
-          else
-            echo "/opt/bird3/bird.conf already exists, skipped"
-          fi
-
+          sudo cp bird3 birdcl birdc bird3.conf.example /opt/bird3/
           sudo cp bird3.service /etc/systemd/system/bird3.service
+
+          sudo cp /opt/bird3/bird3.conf.example /opt/bird3/bird3.conf
+          sudo chmod +x /opt/bird3/bird3 /opt/bird3/birdcl /opt/bird3/birdc
 
           sudo systemctl daemon-reload
           sudo systemctl enable bird3
-
-          echo
-          echo "Installed BIRD 3 to /opt/bird3"
-          echo
-          echo "Files:"
-          echo "  /opt/bird3/bird"
-          echo "  /opt/bird3/birdcl"
-          echo "  /opt/bird3/bird.conf"
-          echo "  /opt/bird3/bird.conf.example"
-          echo "  /etc/systemd/system/bird3.service"
-          echo
-          echo "Start:"
-          echo "  sudo systemctl start bird3"
-          echo
-          echo "Status:"
-          echo "  sudo systemctl status bird3"
-          echo
-          echo "Client:"
-          echo "  sudo /opt/bird3/birdcl -s /opt/bird3/bird.ctl show status"
-          EOF
-
-          chmod +x "${PKG_DIR}/install.sh"
-
-          cat > "${PKG_DIR}/README.md" <<EOF
-          # BIRD ${VERSION} ${TARGET}
-
-          Runtime package for BIRD ${VERSION}.
-
-          ## Directory Layout
-
-          After extracting:
-
-          \`\`\`text
-          bird-${VERSION}-${TARGET}/
-          ├── bird
-          ├── birdcl
-          ├── bird.conf.example
-          ├── bird3.service
-          ├── install.sh
-          ├── README.md
-          └── manifest.json
-          \`\`\`
-
-          ## Install
-
-          \`\`\`bash
-          tar -xzf bird-${VERSION}-${TARGET}.tar.gz
-          cd bird-${VERSION}-${TARGET}
-          ./install.sh
           sudo systemctl start bird3
           \`\`\`
 
           ## Check
 
           \`\`\`bash
-          /opt/bird3/bird -v
-          sudo /opt/bird3/birdcl -s /opt/bird3/bird.ctl show status
-          \`\`\`
-
-          ## Config
-
-          Default config path:
-
-          \`\`\`text
-          /opt/bird3/bird.conf
-          \`\`\`
-
-          Example config:
-
-          \`\`\`text
-          /opt/bird3/bird.conf.example
+          /opt/bird3/bird3 --version
+          /opt/bird3/birdcl --version
+          systemctl status bird3
           \`\`\`
           EOF
 
-          sed -i 's/^          //' "${PKG_DIR}/README.md"
+          tar -czf "${PACKAGE_NAME}.tar.gz" "$PACKAGE_NAME"
+          sha256sum "${PACKAGE_NAME}.tar.gz" > "${PACKAGE_NAME}.tar.gz.sha256"
 
-          cat > "${PKG_DIR}/manifest.json" <<EOF
-          {
-            "name": "bird3",
-            "version": "${VERSION}",
-            "target": "linux/${ARCH}",
-            "build": "ubuntu-24.04",
-            "lto": false,
-            "protocols": "default",
-            "layout": "flat",
-            "install_prefix": "/opt/bird3",
-            "binary": "/opt/bird3/bird",
-            "client": "/opt/bird3/birdcl",
-            "config": "/opt/bird3/bird.conf",
-            "config_example": "/opt/bird3/bird.conf.example",
-            "control_socket": "/opt/bird3/bird.ctl",
-            "service": "/etc/systemd/system/bird3.service"
-          }
-          EOF
-
-          tar -czf "bird-${VERSION}-${TARGET}.tar.gz" "${PKG_DIR}"
-
-          sha256sum "bird-${VERSION}-${TARGET}.tar.gz" > "bird-${VERSION}-${TARGET}.sha256"
-
-          echo "Package created:"
-          ls -lh "bird-${VERSION}-${TARGET}.tar.gz"
-          cat "bird-${VERSION}-${TARGET}.sha256"
-
-      - name: Upload artifact
+      - name: Upload artifact to Actions
         uses: actions/upload-artifact@v4
         with:
-          name: bird-${{ needs.detect.outputs.version }}-${{ matrix.target }}
+          name: bird3-${{ needs.detect.outputs.version }}-${{ matrix.artifact_name }}
           path: |
-            bird-${{ needs.detect.outputs.version }}-${{ matrix.target }}.tar.gz
-            bird-${{ needs.detect.outputs.version }}-${{ matrix.target }}.sha256
-          if-no-files-found: error
+            bird3-${{ needs.detect.outputs.version }}-${{ matrix.artifact_name }}.tar.gz
+            bird3-${{ needs.detect.outputs.version }}-${{ matrix.artifact_name }}.tar.gz.sha256
 
   release:
-    name: Publish GitHub Release
+    name: Create GitHub Release
     needs:
       - detect
       - build
-
-    if: needs.detect.outputs.should_build == 'true'
-
+    if: needs.detect.outputs.release_exists == 'false'
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Download build artifacts
+      - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
-          path: dist
+          path: release-assets
           merge-multiple: true
 
-      - name: Generate sha256sum.txt
+      - name: List release assets
+        shell: bash
+        run: |
+          find release-assets -type f -maxdepth 2 -print
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
 
-          cd dist
-          cat *.sha256 > sha256sum.txt
+          VERSION="${{ needs.detect.outputs.version }}"
+          TAG="${{ needs.detect.outputs.tag }}"
+          SOURCE_URL="${{ needs.detect.outputs.source_url }}"
 
-          echo "Release files:"
-          ls -lh
-          cat sha256sum.txt
-
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.detect.outputs.tag }}
-          name: BIRD ${{ needs.detect.outputs.version }}
-          body: |
-            Automated BIRD 3 build.
-
-            Source:
-
-            `${{ needs.detect.outputs.download_url }}`
-
-            Package layout:
-
-            ```text
-            bird-${{ needs.detect.outputs.version }}-linux-amd64/
-            ├── bird
-            ├── birdcl
-            ├── bird.conf.example
-            ├── bird3.service
-            ├── install.sh
-            ├── README.md
-            └── manifest.json
-            ```
-
-            Targets:
-
-            - linux-amd64
-            - linux-arm64
-
-            Install example:
-
-            ```bash
-            tar -xzf bird-${{ needs.detect.outputs.version }}-linux-amd64.tar.gz
-            cd bird-${{ needs.detect.outputs.version }}-linux-amd64
-            ./install.sh
-            sudo systemctl start bird3
-            ```
-
-            Check:
-
-            ```bash
-            /opt/bird3/bird -v
-            sudo /opt/bird3/birdcl -s /opt/bird3/bird.ctl show status
-            ```
-          files: |
-            dist/*.tar.gz
-            dist/*.sha256
-            dist/sha256sum.txt
-          fail_on_unmatched_files: true
+          gh release create "$TAG" \
+            release-assets/* \
+            --repo "$GH_REPO" \
+            --title "BIRD3 ${VERSION}" \
+            --notes "Auto-built BIRD3 ${VERSION} from official source: ${SOURCE_URL}"
