@@ -1,4 +1,4 @@
-name: Build latest BIRD 3
+name: Build latest BIRD
 
 on:
   workflow_dispatch:
@@ -45,11 +45,11 @@ jobs:
 
           source_url="${DOWNLOAD_BASE_URL}/bird-${version}.tar.gz"
 
-          echo "Latest BIRD 3 version: $version"
+          echo "Latest BIRD version: $version"
           echo "Source URL: $source_url"
 
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=bird3-v$version" >> "$GITHUB_OUTPUT"
+          echo "tag=bird-v$version" >> "$GITHUB_OUTPUT"
           echo "source_url=$source_url" >> "$GITHUB_OUTPUT"
 
       - name: Check release exists
@@ -72,7 +72,7 @@ jobs:
           fi
 
   build:
-    name: Build BIRD3 ${{ matrix.artifact_name }}
+    name: Build BIRD ${{ matrix.artifact_name }}
     needs: detect
     if: needs.detect.outputs.release_exists == 'false'
 
@@ -97,7 +97,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build BIRD 3 with Docker
+      - name: Build BIRD with Docker
         shell: bash
         run: |
           set -euo pipefail
@@ -138,8 +138,8 @@ jobs:
               cd \"bird-${VERSION}\"
 
               ./configure \
-                --prefix=/opt/bird3 \
-                --sbindir=/opt/bird3 \
+                --prefix=/opt/bird \
+                --sbindir=/opt/bird \
                 --sysconfdir=/etc/bird \
                 --localstatedir=/var \
                 --runstatedir=/run/bird \
@@ -153,16 +153,16 @@ jobs:
 
               mkdir -p /out
 
-              cp bird /out/bird3
+              cp bird /out/bird
               cp birdcl /out/birdcl
               cp birdc /out/birdc || true
 
-              cp bird.conf.example /out/bird3.conf.example 2>/dev/null || true
+              cp bird.conf.example /out/bird.conf.example 2>/dev/null || true
               cp README* /out/ 2>/dev/null || true
               cp NEWS* /out/ 2>/dev/null || true
               cp COPYING* /out/ 2>/dev/null || true
 
-              ldd /out/bird3 > /out/ldd-bird3.txt || true
+              ldd /out/bird > /out/ldd-bird.txt || true
               ldd /out/birdcl > /out/ldd-birdcl.txt || true
             "
 
@@ -171,34 +171,34 @@ jobs:
         run: |
           set -euo pipefail
 
-          NAME="bird3"
+          NAME="bird"
           VERSION="${{ needs.detect.outputs.version }}"
           SOURCE_URL="${{ needs.detect.outputs.source_url }}"
           ARTIFACT_NAME="${{ matrix.artifact_name }}"
           TARGET="${{ matrix.target }}"
           BUILD="ubuntu-24.04"
-          PACKAGE_NAME="bird3-${VERSION}-${ARTIFACT_NAME}"
+          PACKAGE_NAME="bird-${VERSION}-${ARTIFACT_NAME}"
           BUILT_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
           mkdir -p "$PACKAGE_NAME"
 
-          cp "out-${ARTIFACT_NAME}/bird3" "$PACKAGE_NAME/bird3"
+          cp "out-${ARTIFACT_NAME}/bird" "$PACKAGE_NAME/bird"
           cp "out-${ARTIFACT_NAME}/birdcl" "$PACKAGE_NAME/birdcl"
           cp "out-${ARTIFACT_NAME}/birdc" "$PACKAGE_NAME/birdc" || true
-          cp "out-${ARTIFACT_NAME}/bird3.conf.example" "$PACKAGE_NAME/bird3.conf.example" || true
-          cp "out-${ARTIFACT_NAME}/ldd-bird3.txt" "$PACKAGE_NAME/ldd-bird3.txt" || true
+          cp "out-${ARTIFACT_NAME}/bird.conf.example" "$PACKAGE_NAME/bird.conf.example" || true
+          cp "out-${ARTIFACT_NAME}/ldd-bird.txt" "$PACKAGE_NAME/ldd-bird.txt" || true
           cp "out-${ARTIFACT_NAME}/ldd-birdcl.txt" "$PACKAGE_NAME/ldd-birdcl.txt" || true
           cp "out-${ARTIFACT_NAME}"/README* "$PACKAGE_NAME/" 2>/dev/null || true
           cp "out-${ARTIFACT_NAME}"/NEWS* "$PACKAGE_NAME/" 2>/dev/null || true
           cp "out-${ARTIFACT_NAME}"/COPYING* "$PACKAGE_NAME/" 2>/dev/null || true
 
-          chmod +x "$PACKAGE_NAME/bird3" || true
+          chmod +x "$PACKAGE_NAME/bird" || true
           chmod +x "$PACKAGE_NAME/birdcl" || true
           chmod +x "$PACKAGE_NAME/birdc" || true
 
-          cat > "$PACKAGE_NAME/bird3.service" <<EOF
+          cat > "$PACKAGE_NAME/bird.service" <<EOF
           [Unit]
-          Description=BIRD 3 Internet Routing Daemon
+          Description=BIRD Internet Routing Daemon
           Documentation=https://bird.nic.cz/
           After=network-online.target
           Wants=network-online.target
@@ -207,8 +207,8 @@ jobs:
           Type=simple
           RuntimeDirectory=bird
           RuntimeDirectoryMode=0755
-          ExecStart=/opt/bird3/bird3 -f -c /opt/bird3/bird3.conf -s /run/bird/bird.ctl
-          ExecReload=/opt/bird3/birdc -s /run/bird/bird.ctl configure
+          ExecStart=/opt/bird/bird -f -c /opt/bird/bird.conf -s /run/bird/bird.ctl
+          ExecReload=/opt/bird/birdc -s /run/bird/bird.ctl configure
           Restart=on-failure
           RestartSec=3
           CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
@@ -229,17 +229,17 @@ jobs:
             "source_url": "${SOURCE_URL}",
             "built_at": "${BUILT_AT}",
             "files": {
-              "bird3": "bird3",
+              "bird": "bird",
               "birdcl": "birdcl",
               "birdc": "birdc",
-              "config_example": "bird3.conf.example",
-              "service": "bird3.service"
+              "config_example": "bird.conf.example",
+              "service": "bird.service"
             }
           }
           EOF
 
           cat > "$PACKAGE_NAME/README-RUNTIME.md" <<EOF
-          # BIRD3 ${VERSION} runtime
+          # BIRD ${VERSION} runtime
 
           Built from official source:
 
@@ -247,34 +247,34 @@ jobs:
 
           ## Files
 
-          - bird3
+          - bird
           - birdcl
           - birdc
-          - bird3.conf.example
-          - bird3.service
+          - bird.conf.example
+          - bird.service
           - manifest.json
 
           ## Install example
 
           \`\`\`bash
-          sudo mkdir -p /opt/bird3
-          sudo cp bird3 birdcl birdc bird3.conf.example /opt/bird3/
-          sudo cp bird3.service /etc/systemd/system/bird3.service
+          sudo mkdir -p /opt/bird
+          sudo cp bird birdcl birdc bird.conf.example /opt/bird/
+          sudo cp bird.service /etc/systemd/system/bird.service
 
-          sudo cp /opt/bird3/bird3.conf.example /opt/bird3/bird3.conf
-          sudo chmod +x /opt/bird3/bird3 /opt/bird3/birdcl /opt/bird3/birdc
+          sudo cp /opt/bird/bird.conf.example /opt/bird/bird.conf
+          sudo chmod +x /opt/bird/bird /opt/bird/birdcl /opt/bird/birdc
 
           sudo systemctl daemon-reload
-          sudo systemctl enable bird3
-          sudo systemctl start bird3
+          sudo systemctl enable bird
+          sudo systemctl start bird
           \`\`\`
 
           ## Check
 
           \`\`\`bash
-          /opt/bird3/bird3 --version
-          /opt/bird3/birdcl --version
-          systemctl status bird3
+          /opt/bird/bird --version
+          /opt/bird/birdcl --version
+          systemctl status bird
           \`\`\`
           EOF
 
@@ -284,10 +284,10 @@ jobs:
       - name: Upload artifact to Actions
         uses: actions/upload-artifact@v4
         with:
-          name: bird3-${{ needs.detect.outputs.version }}-${{ matrix.artifact_name }}
+          name: bird-${{ needs.detect.outputs.version }}-${{ matrix.artifact_name }}
           path: |
-            bird3-${{ needs.detect.outputs.version }}-${{ matrix.artifact_name }}.tar.gz
-            bird3-${{ needs.detect.outputs.version }}-${{ matrix.artifact_name }}.tar.gz.sha256
+            bird-${{ needs.detect.outputs.version }}-${{ matrix.artifact_name }}.tar.gz
+            bird-${{ needs.detect.outputs.version }}-${{ matrix.artifact_name }}.tar.gz.sha256
 
   release:
     name: Create GitHub Release
@@ -324,5 +324,5 @@ jobs:
           gh release create "$TAG" \
             release-assets/* \
             --repo "$GH_REPO" \
-            --title "BIRD3 ${VERSION}" \
-            --notes "Auto-built BIRD3 ${VERSION} from official source: ${SOURCE_URL}"
+            --title "BIRD ${VERSION}" \
+            --notes "Auto-built BIRD ${VERSION} from official source: ${SOURCE_URL}"
