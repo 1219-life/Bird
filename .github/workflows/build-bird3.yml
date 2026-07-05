@@ -10,7 +10,6 @@ permissions:
 
 env:
   BIRD_MAJOR: "3"
-  BIRD_HOME: "/opt/bird3"
 
 jobs:
   detect:
@@ -141,8 +140,7 @@ jobs:
             --prefix=/usr \
             --sysconfdir=/etc/bird \
             --localstatedir=/var \
-            --runstatedir=/run \
-            --with-protocols=all
+            --runstatedir=/run
 
           make -j"$(nproc)"
 
@@ -157,27 +155,28 @@ jobs:
 
           SRC_DIR="bird-${VERSION}"
           PKG_DIR="bird-${VERSION}-${TARGET}"
-          INSTALL_DIR="${PKG_DIR}/opt/bird3"
 
-          mkdir -p "${INSTALL_DIR}/bin"
-          mkdir -p "${INSTALL_DIR}/etc"
-          mkdir -p "${INSTALL_DIR}/logs"
-          mkdir -p "${INSTALL_DIR}/run"
-          mkdir -p "${PKG_DIR}/usr/lib/systemd/system"
+          mkdir -p "${PKG_DIR}"
 
-          cp "${SRC_DIR}/bird" "${INSTALL_DIR}/bin/bird"
-          cp "${SRC_DIR}/birdcl" "${INSTALL_DIR}/bin/birdcl"
+          cp "${SRC_DIR}/bird" "${PKG_DIR}/bird"
+          cp "${SRC_DIR}/birdcl" "${PKG_DIR}/birdcl"
 
-          chmod +x "${INSTALL_DIR}/bin/bird"
-          chmod +x "${INSTALL_DIR}/bin/birdcl"
+          chmod +x "${PKG_DIR}/bird"
+          chmod +x "${PKG_DIR}/birdcl"
 
-          cat > "${INSTALL_DIR}/etc/bird.conf" <<'EOF'
+          cat > "${PKG_DIR}/bird.conf.example" <<'EOF'
           log stderr all;
 
           router id 10.255.255.254;
 
           protocol device {
                   scan time 60;
+          }
+
+          protocol direct {
+                  disabled;
+                  ipv4;
+                  ipv6;
           }
 
           protocol kernel {
@@ -194,19 +193,50 @@ jobs:
                   };
           }
 
-          protocol static {
+          protocol static overseas_routes {
                   ipv4;
+                  # include "/opt/bird3/routes4.conf";
           }
 
-          protocol static {
+          protocol static overseas_routes_v6 {
                   ipv6;
+                  # include "/opt/bird3/routes6.conf";
+          }
+
+          protocol ospf v2 {
+                  ipv4 {
+                          export where proto = "overseas_routes";
+                  };
+
+                  area 0.0.0.0 {
+                          interface "eth0" {
+                                  type broadcast;
+                                  cost 10;
+                                  hello 10;
+                                  dead 40;
+                          };
+                  };
+          }
+
+          protocol ospf v3 {
+                  ipv6 {
+                          export where proto = "overseas_routes_v6";
+                  };
+
+                  area 0.0.0.0 {
+                          interface "eth0" {
+                                  type broadcast;
+                                  cost 10;
+                                  hello 10;
+                                  dead 40;
+                          };
+                  };
           }
           EOF
 
-          # 去掉 heredoc 缩进产生的前导空格
-          sed -i 's/^          //' "${INSTALL_DIR}/etc/bird.conf"
+          sed -i 's/^          //' "${PKG_DIR}/bird.conf.example"
 
-          cat > "${PKG_DIR}/usr/lib/systemd/system/bird3.service" <<'EOF'
+          cat > "${PKG_DIR}/bird3.service" <<'EOF'
           [Unit]
           Description=BIRD 3 Internet Routing Daemon
           After=network-online.target
@@ -214,17 +244,17 @@ jobs:
 
           [Service]
           Type=simple
-          ExecStart=/opt/bird3/bin/bird -f -c /opt/bird3/etc/bird.conf -s /opt/bird3/run/bird.ctl
-          ExecReload=/opt/bird3/bin/birdcl -s /opt/bird3/run/bird.ctl configure
+          WorkingDirectory=/opt/bird3
+          ExecStart=/opt/bird3/bird -f -c /opt/bird3/bird.conf -s /opt/bird3/bird.ctl
+          ExecReload=/opt/bird3/birdcl -s /opt/bird3/bird.ctl configure
           Restart=on-failure
           RestartSec=3
-          RuntimeDirectory=bird3
 
           [Install]
           WantedBy=multi-user.target
           EOF
 
-          sed -i 's/^          //' "${PKG_DIR}/usr/lib/systemd/system/bird3.service"
+          sed -i 's/^          //' "${PKG_DIR}/bird3.service"
 
           cat > "${PKG_DIR}/install.sh" <<'EOF'
           #!/usr/bin/env bash
@@ -233,19 +263,44 @@ jobs:
           cd "$(dirname "$0")"
 
           sudo mkdir -p /opt/bird3
-          sudo cp -a opt/bird3/. /opt/bird3/
 
-          sudo chmod +x /opt/bird3/bin/bird
-          sudo chmod +x /opt/bird3/bin/birdcl
+          sudo cp bird /opt/bird3/bird
+          sudo cp birdcl /opt/bird3/birdcl
+          sudo cp bird.conf.example /opt/bird3/bird.conf.example
 
-          sudo cp usr/lib/systemd/system/bird3.service /etc/systemd/system/bird3.service
+          sudo chmod +x /opt/bird3/bird
+          sudo chmod +x /opt/bird3/birdcl
+
+          if [ ! -f /opt/bird3/bird.conf ]; then
+            sudo cp /opt/bird3/bird.conf.example /opt/bird3/bird.conf
+            echo "Created /opt/bird3/bird.conf from example"
+          else
+            echo "/opt/bird3/bird.conf already exists, skipped"
+          fi
+
+          sudo cp bird3.service /etc/systemd/system/bird3.service
 
           sudo systemctl daemon-reload
           sudo systemctl enable bird3
 
+          echo
           echo "Installed BIRD 3 to /opt/bird3"
-          echo "Config file: /opt/bird3/etc/bird.conf"
-          echo "Start with: sudo systemctl start bird3"
+          echo
+          echo "Files:"
+          echo "  /opt/bird3/bird"
+          echo "  /opt/bird3/birdcl"
+          echo "  /opt/bird3/bird.conf"
+          echo "  /opt/bird3/bird.conf.example"
+          echo "  /etc/systemd/system/bird3.service"
+          echo
+          echo "Start:"
+          echo "  sudo systemctl start bird3"
+          echo
+          echo "Status:"
+          echo "  sudo systemctl status bird3"
+          echo
+          echo "Client:"
+          echo "  sudo /opt/bird3/birdcl -s /opt/bird3/bird.ctl show status"
           EOF
 
           chmod +x "${PKG_DIR}/install.sh"
@@ -255,12 +310,20 @@ jobs:
 
           Runtime package for BIRD ${VERSION}.
 
-          ## Files
+          ## Directory Layout
 
-          - /opt/bird3/bin/bird
-          - /opt/bird3/bin/birdcl
-          - /opt/bird3/etc/bird.conf
-          - /etc/systemd/system/bird3.service
+          After extracting:
+
+          \`\`\`text
+          bird-${VERSION}-${TARGET}/
+          ├── bird
+          ├── birdcl
+          ├── bird.conf.example
+          ├── bird3.service
+          ├── install.sh
+          ├── README.md
+          └── manifest.json
+          \`\`\`
 
           ## Install
 
@@ -269,16 +332,31 @@ jobs:
           cd bird-${VERSION}-${TARGET}
           ./install.sh
           sudo systemctl start bird3
-          sudo systemctl status bird3
           \`\`\`
 
-          ## Test
+          ## Check
 
           \`\`\`bash
-          /opt/bird3/bin/bird -v
-          /opt/bird3/bin/birdcl -s /opt/bird3/run/bird.ctl show status
+          /opt/bird3/bird -v
+          sudo /opt/bird3/birdcl -s /opt/bird3/bird.ctl show status
+          \`\`\`
+
+          ## Config
+
+          Default config path:
+
+          \`\`\`text
+          /opt/bird3/bird.conf
+          \`\`\`
+
+          Example config:
+
+          \`\`\`text
+          /opt/bird3/bird.conf.example
           \`\`\`
           EOF
+
+          sed -i 's/^          //' "${PKG_DIR}/README.md"
 
           cat > "${PKG_DIR}/manifest.json" <<EOF
           {
@@ -287,12 +365,15 @@ jobs:
             "target": "linux/${ARCH}",
             "build": "ubuntu-24.04",
             "lto": false,
-            "protocols": "all",
-            "prefix": "/opt/bird3",
-            "binary": "/opt/bird3/bin/bird",
-            "client": "/opt/bird3/bin/birdcl",
-            "config": "/opt/bird3/etc/bird.conf",
-            "service": "bird3.service"
+            "protocols": "default",
+            "layout": "flat",
+            "install_prefix": "/opt/bird3",
+            "binary": "/opt/bird3/bird",
+            "client": "/opt/bird3/birdcl",
+            "config": "/opt/bird3/bird.conf",
+            "config_example": "/opt/bird3/bird.conf.example",
+            "control_socket": "/opt/bird3/bird.ctl",
+            "service": "/etc/systemd/system/bird3.service"
           }
           EOF
 
@@ -351,7 +432,21 @@ jobs:
             Automated BIRD 3 build.
 
             Source:
-            ${{ needs.detect.outputs.download_url }}
+
+            `${{ needs.detect.outputs.download_url }}`
+
+            Package layout:
+
+            ```text
+            bird-${{ needs.detect.outputs.version }}-linux-amd64/
+            ├── bird
+            ├── birdcl
+            ├── bird.conf.example
+            ├── bird3.service
+            ├── install.sh
+            ├── README.md
+            └── manifest.json
+            ```
 
             Targets:
 
@@ -370,8 +465,8 @@ jobs:
             Check:
 
             ```bash
-            /opt/bird3/bin/bird -v
-            /opt/bird3/bin/birdcl -s /opt/bird3/run/bird.ctl show status
+            /opt/bird3/bird -v
+            sudo /opt/bird3/birdcl -s /opt/bird3/bird.ctl show status
             ```
           files: |
             dist/*.tar.gz
