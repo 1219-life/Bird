@@ -281,13 +281,22 @@ jobs:
           tar -czf "${PACKAGE_NAME}.tar.gz" "$PACKAGE_NAME"
           sha256sum "${PACKAGE_NAME}.tar.gz" > "${PACKAGE_NAME}.tar.gz.sha256"
 
+      - name: Check package files
+        shell: bash
+        run: |
+          ls -lh *.tar.gz *.sha256
+
       - name: Upload artifact to Actions
         uses: actions/upload-artifact@v4
+        timeout-minutes: 10
         with:
           name: bird-${{ needs.detect.outputs.version }}-${{ matrix.artifact_name }}
           path: |
             bird-${{ needs.detect.outputs.version }}-${{ matrix.artifact_name }}.tar.gz
             bird-${{ needs.detect.outputs.version }}-${{ matrix.artifact_name }}.tar.gz.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
 
   release:
     name: Create GitHub Release
@@ -300,6 +309,7 @@ jobs:
     steps:
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
+        timeout-minutes: 10
         with:
           path: release-assets
           merge-multiple: true
@@ -308,6 +318,7 @@ jobs:
         shell: bash
         run: |
           find release-assets -type f -maxdepth 2 -print
+          ls -lh release-assets
 
       - name: Create GitHub Release
         env:
